@@ -20,24 +20,37 @@ IMAGES_DIR = DATA_DIR / "images"
 TEMPLATES_DIR = DATA_DIR / "templates"
 BUNDLED_DIR = DATA_DIR / "bundled"
 
+
+# Helper function to get config from Streamlit secrets or environment
+def _get_config(key: str, default: str = "") -> str:
+    """Try Streamlit secrets first, then fall back to environment variables."""
+    try:
+        import streamlit as st
+        if hasattr(st, "secrets") and key in st.secrets:
+            return str(st.secrets[key])
+    except (ImportError, FileNotFoundError, KeyError):
+        pass
+    return os.getenv(key, default)
+
+
 # Claude API
-CLAUDE_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-20250514")
-CLAUDE_MAX_TOKENS = int(os.getenv("CLAUDE_MAX_TOKENS", "4096"))
+CLAUDE_API_KEY = _get_config("ANTHROPIC_API_KEY", "")
+CLAUDE_MODEL = _get_config("CLAUDE_MODEL", "claude-sonnet-4-20250514")
+CLAUDE_MAX_TOKENS = int(_get_config("CLAUDE_MAX_TOKENS", "4096"))
 
 # Web Search (Brave Search API)
-BRAVE_API_KEY = os.getenv("BRAVE_API_KEY", "")
+BRAVE_API_KEY = _get_config("BRAVE_API_KEY", "")
 
 # App
-APP_PASSWORD = os.getenv("APP_PASSWORD", "")
+APP_PASSWORD = _get_config("APP_PASSWORD", "")
 
 # Stock
 DEFAULT_MIN_STOCK = 1.0
-PRIMARY_LOCATION = os.getenv("PRIMARY_LOCATION", "principal")
+PRIMARY_LOCATION = _get_config("PRIMARY_LOCATION", "principal")
 CENTRAL_STOCK_FILE = Path(
-    os.getenv("CENTRAL_STOCK_FILE", str(DATA_DIR / "raw" / "central_trocas.xlsx"))
+    _get_config("CENTRAL_STOCK_FILE", str(DATA_DIR / "raw" / "central_trocas.xlsx"))
 )
-CENTRAL_STOCK_REQUIRED = os.getenv("CENTRAL_STOCK_REQUIRED", "true").lower() in (
+CENTRAL_STOCK_REQUIRED = _get_config("CENTRAL_STOCK_REQUIRED", "true").lower() in (
     "1",
     "true",
     "yes",
@@ -53,7 +66,7 @@ MAX_VISUAL_CANDIDATES_PER_BATCH = 5
 SIMILARITY_CACHE_DAYS = 30
 
 # Edging tape stock
-TAPE_METERS_PER_ROLL = float(os.getenv("TAPE_METERS_PER_ROLL", "20"))
+TAPE_METERS_PER_ROLL = float(_get_config("TAPE_METERS_PER_ROLL", "20"))
 
 # Import - column name mappings (Portuguese -> English)
 PRODUCT_COLUMN_MAP = {
