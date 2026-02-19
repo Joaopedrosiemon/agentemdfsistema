@@ -33,6 +33,16 @@ APP_PASSWORD = os.getenv("APP_PASSWORD", "")
 
 # Stock
 DEFAULT_MIN_STOCK = 1.0
+PRIMARY_LOCATION = os.getenv("PRIMARY_LOCATION", "principal")
+CENTRAL_STOCK_FILE = Path(
+    os.getenv("CENTRAL_STOCK_FILE", str(DATA_DIR / "raw" / "central_trocas.xlsx"))
+)
+CENTRAL_STOCK_REQUIRED = os.getenv("CENTRAL_STOCK_REQUIRED", "true").lower() in (
+    "1",
+    "true",
+    "yes",
+    "y",
+)
 
 # Search
 FUZZY_MATCH_THRESHOLD = 0.6
@@ -41,6 +51,9 @@ MAX_SEARCH_RESULTS = 10
 # Similarity (Claude Vision)
 MAX_VISUAL_CANDIDATES_PER_BATCH = 5
 SIMILARITY_CACHE_DAYS = 30
+
+# Edging tape stock
+TAPE_METERS_PER_ROLL = float(os.getenv("TAPE_METERS_PER_ROLL", "20"))
 
 # Import - column name mappings (Portuguese -> English)
 PRODUCT_COLUMN_MAP = {
@@ -95,8 +108,21 @@ STOCK_COLUMN_MAP = {
     "localizacao": "location",
     "localização": "location",
     "location": "location",
+    "loja": "location",
+    "filial": "location",
+    "store": "location",
+    "branch": "location",
     "unidade": "unit",
     "unit": "unit",
+    "saldo": "quantity_available",
+    "cod_produto": "product_code",
+    "codigo_produto": "product_code",
+    "empresa": "location",
+    "secao": "section",
+    "section": "section",
+    "produto": "product_name",
+    "marca": "brand",
+
 }
 
 EQUIVALENCE_COLUMN_MAP = {
@@ -144,6 +170,12 @@ TAPE_COLUMN_MAP = {
     "familia_cor": "color_family",
     "cor": "color_family",
     "color_family": "color_family",
+    "quantidade": "quantity_available",
+    "qtd": "quantity_available",
+    "estoque": "quantity_available",
+    "quantity": "quantity_available",
+    "quantity_available": "quantity_available",
+    "stock": "quantity_available",
 }
 
 # Supported file types for import

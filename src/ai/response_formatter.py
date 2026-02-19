@@ -1,6 +1,7 @@
 """Format structured data into text for client messages."""
 
 from src.database import queries
+from src.services import edging_tape_service
 
 
 def generate_client_text(
@@ -18,6 +19,12 @@ def generate_client_text(
     if suggestion_type == "direct_equivalence":
         header = "SUBSTITUICAO - EQUIVALENCIA DIRETA"
         explanation = "Este produto e equivalente oficial ao solicitado, apenas de marca diferente."
+    elif suggestion_type == "web_suggestion":
+        header = "SUGESTAO - REFERENCIA DE MERCADO"
+        explanation = (
+            "Este produto foi identificado como alternativa com base em "
+            "referencias de mercado e esta disponivel em nosso estoque."
+        )
     else:
         header = "SUGESTAO - ALTERNATIVA VISUAL"
         explanation = (
@@ -26,11 +33,18 @@ def generate_client_text(
         )
 
     # Get edging tape
-    tapes = queries.get_compatible_tapes(suggested_product_id)
+    tapes = edging_tape_service.find_tape_for_substitute(
+        original_product_id, suggested_product_id
+    )
     tape_text = ""
     if tapes:
         tape = tapes[0]
-        tape_text = f"\nFita de borda compativel: {tape['brand']} {tape['tape_name']} ({tape['tape_code']})"
+        tape_text = (
+            f"\nFita de borda compativel: {tape['brand']} {tape['tape_name']} "
+            f"({tape['tape_code']})"
+        )
+        if "quantity_available" in tape:
+            tape_text += f"\nEstoque fita: {_format_rolls(tape.get('quantity_available', 0))} rolos"
 
     text = (
         f"{header}\n"
@@ -53,3 +67,13 @@ def generate_client_text(
         "success": True,
         "text": text.strip(),
     }
+
+
+def _format_rolls(value: float) -> str:
+    try:
+        v = float(value)
+    except Exception:
+        return "0"
+    if v.is_integer():
+        return str(int(v))
+    return f"{v:.2f}".rstrip("0").rstrip(".")

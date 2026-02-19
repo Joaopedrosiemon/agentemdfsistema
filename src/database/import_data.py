@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from src.database.connection import get_connection
 from src.database.queries import log_import, get_product_by_code
+from src.database.preload_data import _parse_product_name, _match_existing_product
 from src.utils.text_processing import normalize_column_name
 from src.utils.validators import (
     validate_product_dataframe,
@@ -18,6 +19,7 @@ from config.settings import (
     STOCK_COLUMN_MAP,
     EQUIVALENCE_COLUMN_MAP,
     TAPE_COLUMN_MAP,
+    PRIMARY_LOCATION,
 )
 
 
@@ -111,11 +113,31 @@ def import_stock(file: IO, file_name: str) -> ImportResult:
     try:
         df = _read_file(file, file_name)
         df = _map_columns(df, STOCK_COLUMN_MAP)
+        pre_warnings = []
+
+        # If section column exists, keep only MDF "Chapas"
+        if "section" in df.columns:
+            initial = len(df)
+            df["section"] = df["section"].astype(str)
+            df = df[df["section"].str.lower().str.contains("chapa", na=False)]
+            dropped = initial - len(df)
+            if dropped > 0:
+                pre_warnings.append(f"{dropped} linhas ignoradas (secao != chapas)")
+
+        # Drop rows without product_code
+        if "product_code" in df.columns:
+            initial = len(df)
+            df["product_code"] = df["product_code"].astype(str).str.strip()
+            df = df[df["product_code"].notna() & (df["product_code"] != "")]
+            dropped = initial - len(df)
+            if dropped > 0:
+                pre_warnings.append(f"{dropped} linhas ignoradas (product_code vazio)")
 
         validation = validate_stock_dataframe(df)
         if not validation.is_valid:
             log_import(file_name, "stock", 0, 0, "failed", "; ".join(validation.errors))
-            return ImportResult(False, errors=validation.errors, warnings=validation.warnings)
+            warnings = (validation.warnings or []) + pre_warnings
+            return ImportResult(False, errors=validation.errors, warnings=warnings)
 
         conn = get_connection()
         imported = 0
@@ -123,26 +145,100 @@ def import_stock(file: IO, file_name: str) -> ImportResult:
 
         for _, row in df.iterrows():
             try:
+                # If section column exists, only import MDF "Chapas"
+                section_value = ""
+                if "section" in df.columns and pd.notna(row.get("section")):
+                    section_value = str(row.get("section")).strip().lower()
+                if section_value and "chapa" not in section_value:
+                    continue
+
                 code = str(row["product_code"]).strip()
                 product = get_product_by_code(code)
                 if not product:
-                    failed += 1
-                    continue
+                    # Fallback: match by brand + product_name if present
+                    if pd.notna(row.get("brand")) and pd.notna(row.get("product_name")):
+                        brand = str(row.get("brand")).strip().upper()
+                        name = str(row.get("product_name")).strip().upper()
+                        if brand and name:
+                            product = conn.execute(
+                                "SELECT * FROM products WHERE UPPER(product_name) = ? AND UPPER(brand) = ? AND is_active = 1",
+                                (name, brand),
+                            ).fetchone()
+                        if not product:
+                            parsed = _parse_product_name(
+                                str(row.get("product_name")).strip(),
+                                brand,
+                            )
+                            matched_id = _match_existing_product(conn, parsed, brand)
+                            if matched_id:
+                                product = conn.execute(
+                                    "SELECT * FROM products WHERE id = ? AND is_active = 1",
+                                    (matched_id,),
+                                ).fetchone()
+                    if not product:
+                        failed += 1
+                        continue
 
-                conn.execute(
-                    """INSERT OR REPLACE INTO stock
-                       (product_id, quantity_available, quantity_reserved,
-                        minimum_stock, location, unit, last_updated)
-                       VALUES (?, ?, ?, ?, ?, ?,  CURRENT_TIMESTAMP)""",
-                    (
-                        product["id"],
-                        float(row["quantity_available"]) if pd.notna(row.get("quantity_available")) else 0,
-                        float(row.get("quantity_reserved", 0)) if pd.notna(row.get("quantity_reserved")) else 0,
-                        float(row.get("minimum_stock", 0)) if pd.notna(row.get("minimum_stock")) else 0,
-                        str(row.get("location", "principal")).strip() if pd.notna(row.get("location")) else "principal",
-                        str(row.get("unit", "chapa")).strip() if pd.notna(row.get("unit")) else "chapa",
-                    ),
+                location = (
+                    str(row.get("location", PRIMARY_LOCATION)).strip()
+                    if pd.notna(row.get("location"))
+                    else PRIMARY_LOCATION
                 )
+                unit = (
+                    str(row.get("unit", "chapa")).strip()
+                    if pd.notna(row.get("unit"))
+                    else "chapa"
+                )
+                qty_available = (
+                    float(row["quantity_available"])
+                    if pd.notna(row.get("quantity_available"))
+                    else 0
+                )
+                qty_reserved = (
+                    float(row.get("quantity_reserved", 0))
+                    if pd.notna(row.get("quantity_reserved"))
+                    else 0
+                )
+                minimum_stock = (
+                    float(row.get("minimum_stock", 0))
+                    if pd.notna(row.get("minimum_stock"))
+                    else 0
+                )
+
+                existing = conn.execute(
+                    "SELECT id FROM stock WHERE product_id = ? AND location = ?",
+                    (product["id"], location),
+                ).fetchone()
+
+                if existing:
+                    conn.execute(
+                        """UPDATE stock
+                           SET quantity_available = ?, quantity_reserved = ?,
+                               minimum_stock = ?, unit = ?, last_updated = CURRENT_TIMESTAMP
+                           WHERE id = ?""",
+                        (
+                            qty_available,
+                            qty_reserved,
+                            minimum_stock,
+                            unit,
+                            existing["id"],
+                        ),
+                    )
+                else:
+                    conn.execute(
+                        """INSERT INTO stock
+                           (product_id, quantity_available, quantity_reserved,
+                            minimum_stock, location, unit, last_updated)
+                           VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
+                        (
+                            product["id"],
+                            qty_available,
+                            qty_reserved,
+                            minimum_stock,
+                            location,
+                            unit,
+                        ),
+                    )
                 imported += 1
             except Exception:
                 failed += 1
@@ -150,7 +246,8 @@ def import_stock(file: IO, file_name: str) -> ImportResult:
         conn.commit()
         status = "success" if failed == 0 else "partial"
         log_import(file_name, "stock", imported, failed, status)
-        return ImportResult(True, imported, failed, warnings=validation.warnings)
+        warnings = (validation.warnings or []) + pre_warnings
+        return ImportResult(True, imported, failed, warnings=warnings)
 
     except Exception as e:
         log_import(file_name, "stock", 0, 0, "failed", str(e))
@@ -243,21 +340,58 @@ def import_edging_tapes(file: IO, file_name: str) -> ImportResult:
 
         for _, row in df.iterrows():
             try:
-                conn.execute(
-                    """INSERT OR REPLACE INTO edging_tapes
-                       (brand, tape_name, tape_code, width_mm, thickness_mm,
-                        finish, color_family)
-                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                    (
-                        str(row["brand"]).strip(),
-                        str(row["tape_name"]).strip(),
-                        str(row["tape_code"]).strip(),
-                        float(row["width_mm"]) if pd.notna(row.get("width_mm")) else None,
-                        float(row["thickness_mm"]) if pd.notna(row.get("thickness_mm")) else None,
-                        str(row["finish"]).strip() if pd.notna(row.get("finish")) else None,
-                        str(row["color_family"]).strip() if pd.notna(row.get("color_family")) else None,
-                    ),
+                tape_code = str(row["tape_code"]).strip()
+                brand = str(row["brand"]).strip()
+                tape_name = str(row["tape_name"]).strip()
+                width_mm = float(row["width_mm"]) if pd.notna(row.get("width_mm")) else None
+                thickness_mm = float(row["thickness_mm"]) if pd.notna(row.get("thickness_mm")) else None
+                finish = str(row["finish"]).strip() if pd.notna(row.get("finish")) else None
+                color_family = str(row["color_family"]).strip() if pd.notna(row.get("color_family")) else None
+                quantity_available = (
+                    float(row["quantity_available"])
+                    if pd.notna(row.get("quantity_available"))
+                    else 0
                 )
+
+                existing = conn.execute(
+                    "SELECT id FROM edging_tapes WHERE tape_code = ?",
+                    (tape_code,),
+                ).fetchone()
+
+                if existing:
+                    conn.execute(
+                        """UPDATE edging_tapes
+                           SET brand = ?, tape_name = ?, width_mm = ?, thickness_mm = ?,
+                               finish = ?, color_family = ?, quantity_available = ?
+                           WHERE id = ?""",
+                        (
+                            brand,
+                            tape_name,
+                            width_mm,
+                            thickness_mm,
+                            finish,
+                            color_family,
+                            quantity_available,
+                            existing["id"],
+                        ),
+                    )
+                else:
+                    conn.execute(
+                        """INSERT INTO edging_tapes
+                           (brand, tape_name, tape_code, width_mm, thickness_mm,
+                            finish, color_family, quantity_available)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            brand,
+                            tape_name,
+                            tape_code,
+                            width_mm,
+                            thickness_mm,
+                            finish,
+                            color_family,
+                            quantity_available,
+                        ),
+                    )
                 imported += 1
             except Exception:
                 failed += 1

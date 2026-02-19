@@ -27,6 +27,11 @@ TOOLS = [
                 "product_id": {
                     "type": "integer",
                     "description": "ID do produto para verificar estoque",
+                },
+                "include_other_locations": {
+                    "type": "boolean",
+                    "description": "Se true, retorna disponibilidade em outras lojas (alem da principal).",
+                    "default": False,
                 }
             },
             "required": ["product_id"],
@@ -56,35 +61,12 @@ TOOLS = [
         },
     },
     {
-        "name": "find_smart_alternatives",
-        "description": (
-            "Busca alternativas inteligentes (Opcao 2) quando nao ha equivalente direto. "
-            "Analisa atributos (categoria, padrao, acabamento, cor, espessura) e usa "
-            "conhecimento especializado sobre MDFs brasileiros para sugerir os 3 produtos "
-            "mais parecidos dentre os que estao EM ESTOQUE. "
-            "Use quando find_direct_equivalents retornar vazio."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "product_id": {
-                    "type": "integer",
-                    "description": "ID do produto original sem equivalente direto",
-                },
-                "max_results": {
-                    "type": "integer",
-                    "description": "Numero maximo de alternativas (padrao: 3)",
-                    "default": 3,
-                },
-            },
-            "required": ["product_id"],
-        },
-    },
-    {
         "name": "search_web_mdf",
         "description": (
-            "Pesquisa na internet por referencias sobre um produto MDF especifico. "
-            "Retorna informacoes de sites especializados, fabricantes e comparativos. "
+            "Pesquisa na internet por referencias sobre um produto MDF e CRUZA automaticamente "
+            "com nosso estoque local. Retorna: produtos similares mencionados na web que TEMOS "
+            "em estoque + referencias web para o vendedor consultar. "
+            "Inclua a espessura no nome (ex: 15mm) quando conhecida. "
             "IMPORTANTE: Use APENAS quando o vendedor autorizar a pesquisa web explicitamente. "
             "Nunca use sem perguntar antes ao vendedor."
         ),
@@ -170,7 +152,7 @@ TOOLS = [
                 },
                 "suggestion_type": {
                     "type": "string",
-                    "enum": ["direct_equivalence", "visual_similarity", "smart_alternative"],
+                    "enum": ["direct_equivalence", "visual_similarity", "web_suggestion"],
                     "description": "Tipo da sugestao",
                 },
             },

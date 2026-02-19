@@ -1,9 +1,10 @@
 """Product search service with fuzzy matching."""
 
+import re
 from rapidfuzz import fuzz
 from src.database import queries
 from src.utils.text_processing import normalize_text
-from config.settings import FUZZY_MATCH_THRESHOLD, MAX_SEARCH_RESULTS
+from config.settings import FUZZY_MATCH_THRESHOLD, MAX_SEARCH_RESULTS, PRIMARY_LOCATION
 
 # Cache for fuzzy matching (avoids reloading + re-normalizing every search)
 _fuzzy_cache: list[dict] | None = None
@@ -18,6 +19,9 @@ def search(query: str) -> list[dict]:
     if not query:
         return []
 
+    required_thickness = _extract_thickness_mm(query)
+    query_for_match = _normalize_query_for_search(query)
+
     results = []
     seen_ids = set()
 
@@ -31,19 +35,24 @@ def search(query: str) -> list[dict]:
         return [result]
 
     # Strategy 2: SQL LIKE search (fast, uses indexes)
-    sql_results = queries.search_products_by_name(query, limit=20)
+    sql_limit = 100 if required_thickness is not None else 20
+    sql_results = queries.search_products_by_name(query_for_match, limit=sql_limit)
+    exact_name_match = False
     if sql_results:
         for row in sql_results:
             result = dict(row)
-            result["match_score"] = _compute_match_score(query, result)
+            result["match_score"] = _compute_match_score(query_for_match, result)
             result["match_type"] = "name_match"
             _enrich_with_stock(result)
             results.append(result)
             seen_ids.add(result["id"])
+            if normalize_text(result["product_name"]) == normalize_text(query_for_match):
+                exact_name_match = True
 
-    # Strategy 3: Fuzzy matching with cache (only if SQL found < 3 results)
-    if len(results) < 3:
-        normalized_query = normalize_text(query)
+    # Strategy 3: Fuzzy matching with cache (only if SQL found < 3 results
+    # and no exact name match was found)
+    if len(results) < 3 and not exact_name_match:
+        normalized_query = normalize_text(query_for_match)
         fuzzy_items = _get_fuzzy_cache()
 
         fuzzy_results = []
@@ -65,6 +74,22 @@ def search(query: str) -> list[dict]:
             results.append(product)
 
     results.sort(key=lambda x: x["match_score"], reverse=True)
+
+    if required_thickness is not None:
+        matched = []
+        for r in results:
+            thickness = r.get("thickness_mm")
+            r["requested_thickness_mm"] = required_thickness
+            if thickness is None:
+                r["thickness_match"] = False
+                continue
+            if abs(float(thickness) - required_thickness) <= 0.1:
+                r["thickness_match"] = True
+                matched.append(r)
+            else:
+                r["thickness_match"] = False
+        if matched:
+            return matched[:MAX_SEARCH_RESULTS]
     return results[:MAX_SEARCH_RESULTS]
 
 
@@ -120,7 +145,9 @@ def _fuzzy_score_cached(normalized_query: str, item: dict) -> float:
 
 def _enrich_with_stock(product: dict):
     """Add stock information to a product dict."""
-    stock = queries.get_stock_by_product_id(product["id"])
+    stock = queries.get_stock_by_product_id(
+        product["id"], location=PRIMARY_LOCATION
+    )
     if stock:
         product["quantity_available"] = stock["quantity_available"]
         product["quantity_reserved"] = stock["quantity_reserved"]
@@ -131,5 +158,24 @@ def _enrich_with_stock(product: dict):
     else:
         product["quantity_available"] = 0
         product["quantity_reserved"] = 0
-        product["location"] = None
+        product["location"] = PRIMARY_LOCATION
         product["in_stock"] = False
+
+
+def _extract_thickness_mm(text: str) -> float | None:
+    match = re.search(r"(\d+(?:[.,]\d+)?)\s*mm", text, re.IGNORECASE)
+    if not match:
+        return None
+    try:
+        return float(match.group(1).replace(",", "."))
+    except Exception:
+        return None
+
+
+def _normalize_query_for_search(query: str) -> str:
+    """Remove thickness/material tokens to improve name matching."""
+    q = query
+    q = re.sub(r"\b\d+(?:[.,]\d+)?\s*mm\b", "", q, flags=re.IGNORECASE)
+    q = re.sub(r"\b(mdf|mdp|bp|pvc|hdf)\b", "", q, flags=re.IGNORECASE)
+    q = re.sub(r"\s+", " ", q).strip()
+    return q or query

@@ -57,6 +57,7 @@ TABLES = [
         thickness_mm REAL,
         finish TEXT,
         color_family TEXT,
+        quantity_available REAL DEFAULT 0,
         is_active BOOLEAN DEFAULT 1,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
@@ -130,6 +131,7 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_products_name ON products(product_name)",
     "CREATE INDEX IF NOT EXISTS idx_products_category ON products(category)",
     "CREATE INDEX IF NOT EXISTS idx_stock_product ON stock(product_id)",
+    "CREATE INDEX IF NOT EXISTS idx_stock_product_location ON stock(product_id, location)",
     "CREATE INDEX IF NOT EXISTS idx_equivalences_a ON direct_equivalences(product_id_a)",
     "CREATE INDEX IF NOT EXISTS idx_equivalences_b ON direct_equivalences(product_id_b)",
     "CREATE INDEX IF NOT EXISTS idx_tape_compat_product ON tape_product_compatibility(product_id)",
@@ -148,4 +150,13 @@ def initialize_database():
         cursor.execute(table_sql)
     for index_sql in INDEXES:
         cursor.execute(index_sql)
+    _ensure_column(conn, "edging_tapes", "quantity_available", "REAL DEFAULT 0")
     conn.commit()
+
+
+def _ensure_column(conn, table: str, column: str, ddl: str):
+    """Add column if missing (lightweight migration)."""
+    cols = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    existing = {row["name"] for row in cols}
+    if column not in existing:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")

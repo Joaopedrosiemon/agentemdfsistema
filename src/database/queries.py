@@ -3,6 +3,7 @@
 import sqlite3
 from typing import Optional
 from src.database.connection import get_connection
+from config.settings import PRIMARY_LOCATION
 
 
 # ── Products ──────────────────────────────────────────────
@@ -57,22 +58,61 @@ def count_products() -> int:
 
 # ── Stock ─────────────────────────────────────────────────
 
-def get_stock_by_product_id(product_id: int) -> Optional[sqlite3.Row]:
+def get_stock_by_product_id(
+    product_id: int,
+    location: str | None = None,
+) -> Optional[sqlite3.Row]:
     conn = get_connection()
+    if location is None:
+        location = PRIMARY_LOCATION
     return conn.execute(
-        "SELECT * FROM stock WHERE product_id = ?", (product_id,)
+        """SELECT * FROM stock
+           WHERE product_id = ? AND location = ?
+           ORDER BY last_updated DESC
+           LIMIT 1""",
+        (product_id, location),
     ).fetchone()
 
 
-def get_product_with_stock(product_id: int) -> Optional[sqlite3.Row]:
+def get_stock_by_product_locations(product_id: int) -> list[sqlite3.Row]:
     conn = get_connection()
+    return conn.execute(
+        """SELECT * FROM stock
+           WHERE product_id = ?
+           ORDER BY location ASC, last_updated DESC""",
+        (product_id,),
+    ).fetchall()
+
+
+def get_stock_other_locations(
+    product_id: int,
+    primary_location: str | None = None,
+) -> list[sqlite3.Row]:
+    conn = get_connection()
+    if primary_location is None:
+        primary_location = PRIMARY_LOCATION
+    return conn.execute(
+        """SELECT * FROM stock
+           WHERE product_id = ? AND location <> ?
+           ORDER BY location ASC, last_updated DESC""",
+        (product_id, primary_location),
+    ).fetchall()
+
+
+def get_product_with_stock(
+    product_id: int,
+    location: str | None = None,
+) -> Optional[sqlite3.Row]:
+    conn = get_connection()
+    if location is None:
+        location = PRIMARY_LOCATION
     return conn.execute(
         """SELECT p.*, s.quantity_available, s.quantity_reserved,
                   s.minimum_stock, s.location, s.unit, s.last_updated as stock_updated
            FROM products p
-           LEFT JOIN stock s ON p.id = s.product_id
+           LEFT JOIN stock s ON p.id = s.product_id AND s.location = ?
            WHERE p.id = ? AND p.is_active = 1""",
-        (product_id,),
+        (location, product_id),
     ).fetchone()
 
 
@@ -83,8 +123,9 @@ def get_products_in_stock(min_qty: float = 1.0) -> list[sqlite3.Row]:
            FROM products p
            JOIN stock s ON p.id = s.product_id
            WHERE p.is_active = 1
+           AND s.location = ?
            AND (s.quantity_available - s.quantity_reserved) >= ?""",
-        (min_qty,),
+        (PRIMARY_LOCATION, min_qty),
     ).fetchall()
 
 
@@ -106,10 +147,10 @@ def get_equivalents(product_id: int) -> list[sqlite3.Row]:
                CASE WHEN de.product_id_a = ? THEN de.product_id_b
                     ELSE de.product_id_a END = p.id
            )
-           LEFT JOIN stock s ON p.id = s.product_id
+           LEFT JOIN stock s ON p.id = s.product_id AND s.location = ?
            WHERE (de.product_id_a = ? OR de.product_id_b = ?)
            AND p.is_active = 1""",
-        (product_id, product_id, product_id),
+        (product_id, PRIMARY_LOCATION, product_id, product_id),
     ).fetchall()
 
 
@@ -161,6 +202,18 @@ def get_tapes_by_color_family(color_family: str) -> list[sqlite3.Row]:
     ).fetchall()
 
 
+def search_tapes_by_name(query: str, limit: int = 20) -> list[sqlite3.Row]:
+    conn = get_connection()
+    pattern = f"%{query}%"
+    return conn.execute(
+        """SELECT * FROM edging_tapes
+           WHERE (tape_name LIKE ? OR brand LIKE ? OR tape_code LIKE ?)
+           AND is_active = 1
+           LIMIT ?""",
+        (pattern, pattern, pattern, limit),
+    ).fetchall()
+
+
 def count_tapes() -> int:
     conn = get_connection()
     row = conn.execute("SELECT COUNT(*) as cnt FROM edging_tapes WHERE is_active = 1").fetchone()
@@ -189,12 +242,12 @@ def get_cached_similarities_for_product(product_id: int, min_score: float = 0.5)
                CASE WHEN sc.product_id_a = ? THEN sc.product_id_b
                     ELSE sc.product_id_a END = p.id
            )
-           LEFT JOIN stock s ON p.id = s.product_id
+           LEFT JOIN stock s ON p.id = s.product_id AND s.location = ?
            WHERE (sc.product_id_a = ? OR sc.product_id_b = ?)
            AND sc.similarity_score >= ?
            AND p.is_active = 1
            ORDER BY sc.similarity_score DESC""",
-        (product_id, product_id, product_id, min_score),
+        (product_id, PRIMARY_LOCATION, product_id, product_id, min_score),
     ).fetchall()
 
 

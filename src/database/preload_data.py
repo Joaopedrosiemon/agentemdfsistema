@@ -14,7 +14,12 @@ from pathlib import Path
 from src.database.connection import get_connection
 from src.database.queries import log_import
 
-from config.settings import DATA_DIR
+from config.settings import (
+    DATA_DIR,
+    PRIMARY_LOCATION,
+    CENTRAL_STOCK_FILE,
+    CENTRAL_STOCK_REQUIRED,
+)
 
 BUNDLED_DIR = DATA_DIR / "bundled"
 SIMILARITY_FILE = BUNDLED_DIR / "TABELA_SIMILARIDADE_GRUPO_LOCATELLI_0209.xlsx"
@@ -240,20 +245,9 @@ def is_stock_preloaded() -> bool:
 
 def preload_stock() -> dict:
     """
-    Read the Grupo Locatelli stock spreadsheet and import:
-    1. Products from "Chapas" section → MDF products (with stock)
-    2. Products from "Fitas E Acabamentos" → edging tapes (with stock-like info)
-
-    Also tries to match stock products with existing products from the
-    similarity table using fuzzy name matching.
-
-    The spreadsheet columns:
-    - Codigo do Produto (product code from ERP)
-    - Produto (full product name like "Mdf Duratex Carvalho Hanover Design 15mm 2f")
-    - Secao ("Chapas" or "Fitas E Acabamentos")
-    - Marca (brand)
-    - Saldo (stock quantity)
-    - Preco Venda (selling price)
+    Load stock from two sources:
+    1) Primary store stock (STOCK_FILE) -> PRIMARY_LOCATION
+    2) Central de Trocas (CENTRAL_STOCK_FILE) -> other locations (Empresa column)
     """
     if not STOCK_FILE.exists():
         return {
@@ -261,77 +255,62 @@ def preload_stock() -> dict:
             "error": f"Arquivo de estoque nao encontrado: {STOCK_FILE}",
         }
 
+    if CENTRAL_STOCK_REQUIRED and not CENTRAL_STOCK_FILE.exists():
+        return {
+            "success": False,
+            "error": f"Arquivo Central de Trocas nao encontrado: {CENTRAL_STOCK_FILE}",
+        }
+
     if is_stock_preloaded():
         return {"success": True, "message": "Estoque ja carregado anteriormente."}
 
     try:
-        df = pd.read_excel(STOCK_FILE)
-
-        # Normalize column names (handle encoding issues with accents)
-        df.columns = [_normalize_col_name(c) for c in df.columns]
-
-        # Identify columns
-        col_code = _find_column(df, ["codigo do produto", "codigo", "code"])
-        col_name = _find_column(df, ["produto", "product", "nome"])
-        col_section = _find_column(df, ["secao", "section"])
-        col_brand = _find_column(df, ["marca", "brand"])
-        col_stock = _find_column(df, ["saldo", "estoque", "stock", "quantidade"])
-        col_price = _find_column(df, ["preco venda", "preco", "price"])
-
-        if not col_name or not col_brand or not col_stock:
-            return {
-                "success": False,
-                "error": "Colunas obrigatorias nao encontradas (Produto, Marca, Saldo).",
-            }
-
-        # Remove totals row (last row with NaN in product name)
-        df = df.dropna(subset=[col_name])
-
         conn = get_connection()
         products_created = 0
         products_updated = 0
         stock_entries = 0
         tapes_created = 0
         errors = []
+        warnings = []
 
-        for _, row in df.iterrows():
-            try:
-                product_name = str(row[col_name]).strip()
-                brand = str(row[col_brand]).strip().upper()
-                stock_qty = float(row[col_stock]) if pd.notna(row[col_stock]) else 0
-                erp_code = str(int(row[col_code])) if pd.notna(row.get(col_code)) else ""
-                section = str(row[col_section]).strip() if col_section and pd.notna(row.get(col_section)) else ""
-                price = float(row[col_price]) if col_price and pd.notna(row.get(col_price)) else None
+        # Primary store stock (Fortaleza)
+        primary_result = _preload_stock_file(
+            conn,
+            STOCK_FILE,
+            default_location=PRIMARY_LOCATION,
+            use_location_column=False,
+            allow_tapes=True,
+            update_product_code=True,
+            skip_locations=None,
+        )
+        products_created += primary_result["products_created"]
+        products_updated += primary_result["products_updated"]
+        stock_entries += primary_result["stock_entries"]
+        tapes_created += primary_result["tapes_created"]
+        errors.extend(primary_result["errors"])
+        warnings.extend(primary_result["warnings"])
 
-                # Parse product details from full name
-                parsed = _parse_product_name(product_name, brand)
-
-                if "fita" in section.lower() or "acabamento" in section.lower():
-                    # Import as edging tape
-                    tape_id = _import_tape(conn, parsed, brand, erp_code, stock_qty)
-                    if tape_id:
-                        tapes_created += 1
-                else:
-                    # Import as MDF product (Chapas)
-                    # Try to match with existing product from similarity table
-                    existing_id = _match_existing_product(conn, parsed, brand)
-
-                    if existing_id:
-                        # Update existing product with stock info and additional details
-                        _update_product_details(conn, existing_id, parsed, erp_code, price)
-                        _upsert_stock(conn, existing_id, stock_qty)
-                        products_updated += 1
-                        stock_entries += 1
-                    else:
-                        # Create new product + stock
-                        product_id = _create_stock_product(conn, parsed, brand, erp_code, price)
-                        if product_id:
-                            _upsert_stock(conn, product_id, stock_qty)
-                            products_created += 1
-                            stock_entries += 1
-
-            except Exception as e:
-                errors.append(f"{product_name}: {str(e)}")
+        # Central de Trocas (other stores)
+        if CENTRAL_STOCK_FILE.exists():
+            central_result = _preload_stock_file(
+                conn,
+                CENTRAL_STOCK_FILE,
+                default_location=None,
+                use_location_column=True,
+                allow_tapes=False,
+                update_product_code=False,
+                skip_locations={PRIMARY_LOCATION},
+            )
+            products_created += central_result["products_created"]
+            products_updated += central_result["products_updated"]
+            stock_entries += central_result["stock_entries"]
+            tapes_created += central_result["tapes_created"]
+            errors.extend(central_result["errors"])
+            warnings.extend(central_result["warnings"])
+        elif not CENTRAL_STOCK_REQUIRED:
+            warnings.append(
+                f"Central de Trocas nao encontrado: {CENTRAL_STOCK_FILE}"
+            )
 
         conn.commit()
 
@@ -352,6 +331,7 @@ def preload_stock() -> dict:
             "stock_entries": stock_entries,
             "tapes_created": tapes_created,
             "errors": errors[:10],
+            "warnings": warnings[:10],
         }
 
     except Exception as e:
@@ -382,6 +362,168 @@ def _find_column(df: pd.DataFrame, candidates: list[str]) -> str | None:
                 return col
 
     return None
+
+
+def _parse_erp_code(value) -> str:
+    """Normalize ERP codes from Excel (supports numeric or composite codes)."""
+    if value is None or (hasattr(pd, "isna") and pd.isna(value)):
+        return ""
+    raw = str(value).strip()
+    if not raw:
+        return ""
+    # Excel often stores codes as floats (e.g., 9978.0)
+    if re.fullmatch(r"\d+(?:\.0+)?", raw):
+        return str(int(float(raw)))
+    return raw
+
+
+def _preload_stock_file(
+    conn,
+    file_path: Path,
+    default_location: str | None,
+    use_location_column: bool,
+    allow_tapes: bool,
+    update_product_code: bool,
+    skip_locations: set[str] | None,
+) -> dict:
+    """Import stock data from a given file path with flexible location rules."""
+    df = pd.read_excel(file_path)
+
+    # Normalize column names (handle encoding issues with accents)
+    df.columns = [_normalize_col_name(c) for c in df.columns]
+
+    # Identify columns
+    col_code = _find_column(df, ["codigo do produto", "codigo", "code"])
+    col_name = _find_column(df, ["produto", "product", "nome"])
+    col_section = _find_column(df, ["secao", "section"])
+    col_brand = _find_column(df, ["marca", "brand"])
+    col_stock = _find_column(df, ["saldo", "estoque", "stock", "quantidade"])
+    col_price = _find_column(df, ["preco venda", "preco", "price"])
+    col_location = (
+        _find_column(df, ["empresa", "localizacao", "location", "loja", "filial"])
+        if use_location_column
+        else None
+    )
+
+    if not col_name or not col_brand or not col_stock:
+        return {
+            "products_created": 0,
+            "products_updated": 0,
+            "stock_entries": 0,
+            "tapes_created": 0,
+            "errors": [
+                f"Colunas obrigatorias nao encontradas em {file_path} (Produto, Marca, Saldo)."
+            ],
+            "warnings": [],
+        }
+
+    # Remove totals row (last row with NaN in product name)
+    df = df.dropna(subset=[col_name])
+
+    products_created = 0
+    products_updated = 0
+    stock_entries = 0
+    tapes_created = 0
+    errors = []
+    warnings = []
+    brand_cache = _build_brand_cache(conn)
+
+    for _, row in df.iterrows():
+        product_name = "linha_desconhecida"
+        try:
+            product_name = str(row[col_name]).strip()
+            brand = str(row[col_brand]).strip().upper()
+            stock_qty = float(row[col_stock]) if pd.notna(row[col_stock]) else 0
+            erp_code = _parse_erp_code(row.get(col_code)) if col_code else ""
+            section = (
+                str(row[col_section]).strip()
+                if col_section and pd.notna(row.get(col_section))
+                else ""
+            )
+            price = (
+                float(row[col_price])
+                if col_price and pd.notna(row.get(col_price))
+                else None
+            )
+
+            location = default_location or PRIMARY_LOCATION
+            if col_location and pd.notna(row.get(col_location)):
+                location = str(row.get(col_location)).strip()
+            if skip_locations and location in skip_locations:
+                continue
+
+            # If we're not importing tapes, skip non-"Chapas" rows when section exists
+            if col_section and not allow_tapes:
+                section_value = section.lower()
+                if section_value and "chapa" not in section_value:
+                    continue
+
+            # Parse product details from full name
+            parsed = _parse_product_name(product_name, brand)
+
+            if allow_tapes and ("fita" in section.lower() or "acabamento" in section.lower()):
+                # Import as edging tape
+                tape_id = _import_tape(conn, parsed, brand, erp_code, stock_qty)
+                if tape_id:
+                    tapes_created += 1
+                continue
+
+            # Import as MDF product (Chapas)
+            existing_id = _match_existing_product(
+                conn,
+                parsed,
+                brand,
+                brand_cache=brand_cache,
+            )
+
+            if existing_id:
+                _update_product_details(
+                    conn,
+                    existing_id,
+                    parsed,
+                    erp_code,
+                    price,
+                    update_product_code=update_product_code,
+                )
+                _upsert_stock(conn, existing_id, stock_qty, location=location)
+                products_updated += 1
+                stock_entries += 1
+            else:
+                product_id = _create_stock_product(conn, parsed, brand, erp_code, price)
+                if product_id:
+                    _upsert_stock(conn, product_id, stock_qty, location=location)
+                    products_created += 1
+                    stock_entries += 1
+
+        except Exception as e:
+            errors.append(f"{product_name}: {str(e)}")
+
+    return {
+        "products_created": products_created,
+        "products_updated": products_updated,
+        "stock_entries": stock_entries,
+        "tapes_created": tapes_created,
+        "errors": errors,
+        "warnings": warnings,
+    }
+
+
+def _build_brand_cache(conn) -> dict[str, list[dict]]:
+    """Build a cache of products by brand for faster matching."""
+    rows = conn.execute(
+        "SELECT id, brand, product_name, thickness_mm FROM products WHERE is_active = 1"
+    ).fetchall()
+    cache: dict[str, list[dict]] = {}
+    for row in rows:
+        brand = str(row["brand"]).upper()
+        cache.setdefault(brand, []).append(
+            {
+                "id": row["id"],
+                "product_name": row["product_name"],
+                "thickness_mm": row["thickness_mm"],
+            }
+        )
+    return cache
 
 
 def _parse_product_name(full_name: str, brand: str) -> dict:
@@ -466,7 +608,12 @@ def _parse_product_name(full_name: str, brand: str) -> dict:
     return result
 
 
-def _match_existing_product(conn, parsed: dict, brand: str) -> int | None:
+def _match_existing_product(
+    conn,
+    parsed: dict,
+    brand: str,
+    brand_cache: dict[str, list[dict]] | None = None,
+) -> int | None:
     """
     Try to match a stock product with an existing product from the similarity table.
     Uses the short_name extracted from the full product name.
@@ -484,22 +631,44 @@ def _match_existing_product(conn, parsed: dict, brand: str) -> int | None:
     brand_db = brand_map.get(brand_upper, brand_upper)
 
     # Strategy 1: Exact match on brand + product_name
-    existing = conn.execute(
-        "SELECT id FROM products WHERE brand = ? AND UPPER(product_name) = ? AND is_active = 1",
-        (brand_db, short_name),
-    ).fetchone()
-    if existing:
-        return existing["id"]
+    if brand_cache is not None:
+        for candidate in brand_cache.get(brand_db, []):
+            if str(candidate["product_name"]).upper() == short_name:
+                candidate_thickness = candidate.get("thickness_mm")
+                parsed_thickness = parsed.get("thickness_mm")
+                if _thickness_conflicts(parsed_thickness, candidate_thickness):
+                    continue
+                return candidate["id"]
+    else:
+        existing = conn.execute(
+            "SELECT id, thickness_mm FROM products WHERE brand = ? AND UPPER(product_name) = ? AND is_active = 1",
+            (brand_db, short_name),
+        ).fetchone()
+        if existing:
+            if not _thickness_conflicts(parsed.get("thickness_mm"), existing["thickness_mm"]):
+                return existing["id"]
 
     # Strategy 2: Check if the short_name CONTAINS the product_name or vice versa
     # e.g., stock "CARVALHO HANOVER" matches similarity table "CARVALHO HANOVER"
-    candidates = conn.execute(
-        "SELECT id, product_name FROM products WHERE brand = ? AND is_active = 1",
-        (brand_db,),
-    ).fetchall()
+    if brand_cache is not None:
+        candidates = brand_cache.get(brand_db, [])
+    else:
+        candidates = conn.execute(
+            "SELECT id, product_name FROM products WHERE brand = ? AND is_active = 1",
+            (brand_db,),
+        ).fetchall()
 
     for candidate in candidates:
-        candidate_name = candidate["product_name"].upper()
+        candidate_name = str(candidate["product_name"]).upper()
+        candidate_thickness = candidate.get("thickness_mm") if isinstance(candidate, dict) else None
+        if candidate_thickness is None and not isinstance(candidate, dict):
+            try:
+                candidate_thickness = candidate["thickness_mm"]
+            except Exception:
+                candidate_thickness = None
+        parsed_thickness = parsed.get("thickness_mm")
+        if _thickness_conflicts(parsed_thickness, candidate_thickness):
+            continue
         # Check if one name contains the other
         if candidate_name in short_name or short_name in candidate_name:
             return candidate["id"]
@@ -517,7 +686,27 @@ def _match_existing_product(conn, parsed: dict, brand: str) -> int | None:
     return None
 
 
-def _update_product_details(conn, product_id: int, parsed: dict, erp_code: str, price: float | None):
+def _thickness_conflicts(
+    parsed_thickness: float | None,
+    candidate_thickness: float | None,
+) -> bool:
+    """Return True if thickness differs (when both are known)."""
+    if parsed_thickness is None or candidate_thickness is None:
+        return False
+    try:
+        return abs(float(parsed_thickness) - float(candidate_thickness)) > 0.1
+    except Exception:
+        return False
+
+
+def _update_product_details(
+    conn,
+    product_id: int,
+    parsed: dict,
+    erp_code: str,
+    price: float | None,
+    update_product_code: bool = True,
+):
     """Update an existing product with additional details from stock sheet."""
     updates = []
     params = []
@@ -530,7 +719,7 @@ def _update_product_details(conn, product_id: int, parsed: dict, erp_code: str, 
         updates.append("finish = ?")
         params.append(parsed["finish"])
 
-    if erp_code:
+    if update_product_code and erp_code:
         updates.append("product_code = ?")
         params.append(erp_code)
 
@@ -542,23 +731,30 @@ def _update_product_details(conn, product_id: int, parsed: dict, erp_code: str, 
         )
 
 
-def _upsert_stock(conn, product_id: int, quantity: float):
+def _upsert_stock(
+    conn,
+    product_id: int,
+    quantity: float,
+    location: str = PRIMARY_LOCATION,
+):
     """Insert or update stock entry for a product."""
     existing = conn.execute(
-        "SELECT id FROM stock WHERE product_id = ?", (product_id,)
+        "SELECT id FROM stock WHERE product_id = ? AND location = ?",
+        (product_id, location),
     ).fetchone()
 
     if existing:
         conn.execute(
             """UPDATE stock SET quantity_available = ?, last_updated = CURRENT_TIMESTAMP
-               WHERE product_id = ?""",
-            (quantity, product_id),
+               WHERE product_id = ? AND location = ?""",
+            (quantity, product_id, location),
         )
     else:
         conn.execute(
-            """INSERT INTO stock (product_id, quantity_available, quantity_reserved, last_updated)
-               VALUES (?, ?, 0, CURRENT_TIMESTAMP)""",
-            (product_id, quantity),
+            """INSERT INTO stock
+               (product_id, quantity_available, quantity_reserved, location, last_updated)
+               VALUES (?, ?, 0, ?, CURRENT_TIMESTAMP)""",
+            (product_id, quantity, location),
         )
 
 
@@ -608,17 +804,44 @@ def _import_tape(conn, parsed: dict, brand: str, erp_code: str, stock_qty: float
     tape_thickness = float(thickness_match.group(1).replace(",", ".")) if thickness_match else None
 
     try:
+        existing = conn.execute(
+            "SELECT id FROM edging_tapes WHERE tape_code = ?",
+            (tape_code,),
+        ).fetchone()
+
+        if existing:
+            conn.execute(
+                """UPDATE edging_tapes
+                   SET brand = ?, tape_name = ?, width_mm = ?, thickness_mm = ?,
+                       finish = ?, color_family = ?, quantity_available = ?
+                   WHERE id = ?""",
+                (
+                    brand_upper,
+                    tape_name,
+                    width_mm,
+                    tape_thickness,
+                    parsed.get("finish"),
+                    _infer_category(tape_name),
+                    stock_qty,
+                    existing["id"],
+                ),
+            )
+            return existing["id"]
+
         cursor = conn.execute(
-            """INSERT OR IGNORE INTO edging_tapes
-               (brand, tape_name, tape_code, width_mm, thickness_mm, color_family)
-               VALUES (?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO edging_tapes
+               (brand, tape_name, tape_code, width_mm, thickness_mm,
+                finish, color_family, quantity_available)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 brand_upper,
                 tape_name,
                 tape_code,
                 width_mm,
                 tape_thickness,
+                parsed.get("finish"),
                 _infer_category(tape_name),
+                stock_qty,
             ),
         )
         return cursor.lastrowid if cursor.lastrowid else None

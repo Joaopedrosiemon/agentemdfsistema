@@ -12,7 +12,6 @@ from src.services import (
     stock_service,
     equivalence_service,
     similarity_service,
-    smart_alternatives_service,
     web_search_service,
     edging_tape_service,
     feedback_service,
@@ -29,7 +28,6 @@ class SubstitutionOrchestrator:
             "search_product": self._handle_search_product,
             "check_stock": self._handle_check_stock,
             "find_direct_equivalents": self._handle_find_equivalents,
-            "find_smart_alternatives": self._handle_find_smart,
             "search_web_mdf": self._handle_web_search,
             "find_compatible_edging_tape": self._handle_find_tape,
             "register_feedback": self._handle_register_feedback,
@@ -167,8 +165,14 @@ class SubstitutionOrchestrator:
             for r in results
         ]
 
-    def _handle_check_stock(self, product_id: int) -> dict:
-        return stock_service.check_availability(product_id)
+    def _handle_check_stock(
+        self,
+        product_id: int,
+        include_other_locations: bool = False,
+    ) -> dict:
+        return stock_service.check_availability(
+            product_id, include_other_locations=include_other_locations
+        )
 
     def _handle_find_equivalents(
         self, product_id: int, require_same_thickness: bool = True
@@ -191,34 +195,10 @@ class SubstitutionOrchestrator:
             for r in results
         ]
 
-    def _handle_find_smart(
-        self, product_id: int, max_results: int = 3
-    ) -> list[dict]:
-        results = smart_alternatives_service.find_smart_alternatives(
-            product_id, max_results=max_results
-        )
-        if results and isinstance(results[0], dict) and "error" in results[0]:
-            return results
-        return [
-            {
-                "id": r["id"],
-                "brand": r.get("brand"),
-                "product_name": r.get("product_name"),
-                "product_code": r.get("product_code"),
-                "thickness_mm": r.get("thickness_mm"),
-                "finish": r.get("finish"),
-                "category": r.get("category"),
-                "net_available": r.get("net_available", 0),
-                "similarity_score": r.get("similarity_score", 0),
-                "justification": r.get("justification", ""),
-            }
-            for r in results
-        ]
-
     def _handle_web_search(
         self, product_name: str, brand: str = ""
-    ) -> list[dict]:
-        return web_search_service.search_mdf_references(product_name, brand)
+    ) -> dict:
+        return web_search_service.search_web_and_cross_reference(product_name, brand)
 
     def _handle_find_tape(self, product_id: int) -> list[dict]:
         results = edging_tape_service.find_compatible(product_id)
@@ -231,6 +211,11 @@ class SubstitutionOrchestrator:
                 "width_mm": r.get("width_mm"),
                 "thickness_mm": r.get("thickness_mm"),
                 "compatibility_type": r.get("compatibility_type", "alternative"),
+                "quantity_available": r.get("quantity_available", 0),
+                "quantity_available_meters": r.get("quantity_available_meters", 0),
+                "unit": r.get("unit", "rolos"),
+                "in_stock": r.get("in_stock", False),
+                "match_score": r.get("match_score", 0),
             }
             for r in results
         ]

@@ -24,7 +24,7 @@ def render_sidebar():
     """Render the sidebar with import and stats sections."""
     with st.sidebar:
         st.header("Agente MDF")
-        st.caption("Copiloto de Substituicao v1.3.0")
+        st.caption("Copiloto de Substituicao v1.3.1")
 
         st.divider()
 

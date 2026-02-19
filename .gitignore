@@ -3,9 +3,6 @@
 venv/
 .venv/
 
-# Database
-data/db/*.db
-
 # Python
 __pycache__/
 *.pyc
@@ -38,3 +35,13 @@ data/raw/*
 # Images (large files)
 data/images/*
 !data/images/.gitkeep
+
+# Excel files with real data (never commit)
+*.xlsx
+*.xls
+*.xlsm
+
+# Database temporary files only (allow main .db file)
+*.db-journal
+*.db-shm
+*.db-wal

@@ -10,7 +10,6 @@ TOOL_LABELS = {
     "search_product": "Buscando produto...",
     "check_stock": "Verificando estoque...",
     "find_direct_equivalents": "Buscando equivalentes diretos...",
-    "find_smart_alternatives": "Buscando alternativas inteligentes...",
     "search_web_mdf": "Pesquisando na internet...",
     "find_compatible_edging_tape": "Buscando fita de borda...",
     "register_feedback": "Registrando feedback...",
