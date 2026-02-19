@@ -35,9 +35,20 @@ def render_chat():
 
     # Check API key
     if not CLAUDE_API_KEY:
-        st.warning(
-            "Chave da API Anthropic nao configurada. "
-            "Configure a variavel ANTHROPIC_API_KEY no arquivo .env ou nas Secrets do Streamlit."
+        # Debug info
+        import os
+        has_env = os.path.exists(".env")
+        has_secrets = hasattr(st, "secrets")
+        in_secrets = has_secrets and "ANTHROPIC_API_KEY" in st.secrets
+
+        st.error(
+            "❌ Chave da API Anthropic não configurada.\n\n"
+            f"**Debug:**\n"
+            f"- Arquivo .env existe: {has_env}\n"
+            f"- Streamlit secrets disponível: {has_secrets}\n"
+            f"- ANTHROPIC_API_KEY nas secrets: {in_secrets}\n"
+            f"- Valor lido: `{'***' if CLAUDE_API_KEY else 'vazio'}`\n\n"
+            "Configure a variável ANTHROPIC_API_KEY no arquivo .env ou nas Secrets do Streamlit."
         )
         return
 
